@@ -1,0 +1,75 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+conda-env/
+
+# Datasets and raw archives (NEVER COMMIT)
+datasets/
+mvtec/
+mvtec_ad/
+visa/
+btad/
+*.tar
+*.tar.gz
+*.tar.xz
+*.zip
+*.7z
+*.rar
+
+# Model checkpoints, weights, and feature caches (NEVER COMMIT)
+checkpoints/
+*.pth
+*.pt
+*.ckpt
+*.onnx
+*.safetensors
+*.bin
+*.npy
+*.npz
+*.pkl
+*.h5
+
+# Experiment outputs, logs, TensorBoard, and heatmaps
+outputs/*
+!outputs/README.md
+!outputs/.gitkeep
+logs/
+log_txt/
+runs/
+events.out.tfevents*
+wandb/
+
+# Copyrighted PDFs and private notes
+*.pdf
+
+# Credentials, secrets, and Kaggle tokens (NEVER COMMIT)
+.env
+.env.*
+kaggle.json
+*secret*
+*token*
+*credentials*
+*.pem
+*.key
+
+# IDE and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+.ipynb_checkpoints/

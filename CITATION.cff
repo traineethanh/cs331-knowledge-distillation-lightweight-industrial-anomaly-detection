@@ -1,0 +1,44 @@
+cff-version: 1.2.0
+message: "If you use this repository or its research findings, please cite both the original CDA paper and this CS331 research repository."
+title: "CS331 — Knowledge Distillation-Based Lightweight Industrial Anomaly Detection"
+authors:
+  - family-names: "Thành"
+    given-names: "Quang"
+  - name: "Luân"
+version: 0.1.0
+date-released: 2026-10-23
+url: "https://github.com/traineethanh/cs331-knowledge-distillation-lightweight-industrial-anomaly-detection"
+references:
+  - type: article
+    title: "Efficient industrial anomaly detection via cross-scale distillation with enhanced feature compression"
+    authors:
+      - family-names: "Hu"
+        given-names: "Ronglong"
+      - family-names: "Yi"
+        given-names: "Jizheng"
+      - family-names: "Li"
+        given-names: "Xiaoyao"
+      - family-names: "Chen"
+        given-names: "Aibin"
+      - family-names: "Han"
+        given-names: "Guangjie"
+    journal: "Pattern Recognition"
+    volume: 173
+    start: 112761
+    year: 2026
+    doi: "10.1016/j.patcog.2025.112761"
+    url: "https://github.com/WHUer-cloud/CDA"
+  - type: conference-paper
+    title: "Student-Teacher Feature Pyramid Matching for Anomaly Detection"
+    authors:
+      - family-names: "Wang"
+        given-names: "Guodong"
+      - family-names: "Han"
+        given-names: "Shumin"
+      - family-names: "Ding"
+        given-names: "Errui"
+      - family-names: "Huang"
+        given-names: "Di"
+    collection-title: "British Machine Vision Conference (BMVC)"
+    year: 2021
+    doi: "10.5244/C.35.349"

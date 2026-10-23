@@ -1,0 +1,40 @@
+# Researcher A (Thành) — Calibrated Cross-Scale Reliability Fusion (A1-A3)
+# Evaluates directly on frozen B0 baseline checkpoints without retraining.
+
+experiment:
+  name: "A3_calibrated_reliability_fusion"
+  branch_owner: "thanh_research_a"
+  seed: 42
+  output_dir: "./outputs/research_a"
+
+dataset:
+  name: "mvtec_ad"
+  data_root: "./datasets/mvtec"
+  img_size: 256
+  mean: [0.485, 0.456, 0.406]
+  std: [0.229, 0.224, 0.225]
+  core_categories:
+    - "carpet"
+    - "bottle"
+    - "screw"
+
+model:
+  variant: "B0"
+  teacher_backbone: "wide_resnet50_2"
+  teacher_pretrained: true
+  adapter_mode: "dense"
+  gcm_conv_mode: "dense"
+
+inference:
+  # Supported ablation modes:
+  # - "A0_baseline": Official uncalibrated static sum + sigma=4 + max()
+  # - "A1_calibrated": Normal-distribution Z-score calibration on train/good
+  # - "A2_reliability_gate": A1 + Multiplicative cross-scale concordance gate (a_k * ac_k)
+  # - "A3_adaptive_topq": A2 + Scale-adaptive Gaussian smoothing (2.0, 3.0, 4.0) + Top-q% image score
+  fusion_mode: "A3_adaptive_topq"
+  calibration_stat: "zscore"        # "zscore" | "iqr"
+  reliability_eta: 0.5
+  scale_sigmas: [2.0, 3.0, 4.0]
+  gaussian_sigma: 4.0
+  image_score_mode: "top_q"
+  top_q_percent: 0.005

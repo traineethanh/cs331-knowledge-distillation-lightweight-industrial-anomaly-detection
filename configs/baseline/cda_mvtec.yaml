@@ -1,0 +1,70 @@
+# Paper-Faithful & Bug-Fixed CDA Baseline Configuration (B0 / A0)
+# Reference: Hu et al., Pattern Recognition, Vol. 173, 112761 (2026)
+# Official Code Audited: https://github.com/WHUer-cloud/CDA
+
+experiment:
+  name: "B0_cda_baseline"
+  branch_owner: "shared_baseline"
+  seed: 42
+  output_dir: "./outputs/baseline"
+
+dataset:
+  name: "mvtec_ad"
+  data_root: "./datasets/mvtec"
+  img_size: 256
+  mean: [0.485, 0.456, 0.406]
+  std: [0.229, 0.224, 0.225]
+  core_categories:
+    - "carpet"
+    - "bottle"
+    - "screw"
+  all_categories:
+    - "bottle"
+    - "cable"
+    - "capsule"
+    - "carpet"
+    - "grid"
+    - "hazelnut"
+    - "leather"
+    - "metal_nut"
+    - "pill"
+    - "screw"
+    - "tile"
+    - "toothbrush"
+    - "transistor"
+    - "wood"
+    - "zipper"
+
+model:
+  variant: "B0"
+  teacher_backbone: "wide_resnet50_2"
+  teacher_pretrained: true
+  adapter_mode: "dense"             # "dense" (16.52M) | "separable" (1.86M) | "infer_pruned" (0M at test)
+  gcm_conv_mode: "dense"            # "dense" | "separable"
+
+training:
+  epochs: 160
+  batch_size: 4
+  lr: 0.005
+  betas: [0.5, 0.999]
+  weight_decay: 0.0
+  shuffle: false                    # Matches official train.py line 28
+  drop_last: true                   # Matches official train.py line 28
+  num_workers: 2
+  save_interval: 10
+  eval_interval: 20                 # Official repo uses 5; 20 saves 35% Kaggle wall-clock time
+
+loss:
+  lambda_same: 2.0
+  lambda_cross: 0.1
+  cross_scale_weights: [0.4, 0.2, 0.4]
+  cross_loss_mode: "official_train" # "official_train" (train.py lines 43-45) | "symmetric_metric" (metric.py line 32)
+
+inference:
+  fusion_mode: "A0_baseline"        # "A0_baseline" | "A1_calibrated" | "A2_reliability_gate" | "A3_adaptive_topq"
+  same_weight: 2.0
+  cross_weight: 0.1
+  cross_scale_weights: [0.4, 0.2, 0.4]
+  gaussian_sigma: 4.0
+  image_score_mode: "max"           # "max" | "top_q"
+  top_q_percent: 0.005

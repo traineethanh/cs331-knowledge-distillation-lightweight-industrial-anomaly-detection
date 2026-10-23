@@ -1,0 +1,46 @@
+MIT License (Original Project Scaffold, Modular Reconstruction, and Research Extensions)
+
+Copyright (c) 2026 Quang Thanh (Thành) and Luân — CS331 Advanced Computer Vision
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice, the Attribution Notice below, and this permission
+notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+==============================================================================
+ATTRIBUTION AND UPSTREAM PROVENANCE NOTICE
+==============================================================================
+1. Primary Baseline Method (CDA):
+   The baseline architecture reconstructed in `src/anomaly_detection/models/baseline/`
+   is based on the scientific paper:
+     Ronglong Hu, Jizheng Yi, Xiaoyao Li, Aibin Chen, and Guangjie Han,
+     "Efficient industrial anomaly detection via cross-scale distillation with
+     enhanced feature compression," Pattern Recognition, Vol. 173, 112761, 2026.
+     DOI: https://doi.org/10.1016/j.patcog.2025.112761
+   and audited against the authors' reference repository:
+     https://github.com/WHUer-cloud/CDA
+   Note: The upstream repository `WHUer-cloud/CDA` does not specify an open-source
+   LICENSE file as of commit `67224ca04d3aff03c97bdaad04aafb0b3a1ad74e`. No files
+   from `WHUer-cloud/CDA` were copied verbatim into this repository; all modules
+   were re-implemented cleanly with bug fixes for academic research and educational
+   reproducibility in CS331. Any commercial use or redistribution of the CDA
+   algorithm must respect the intellectual property rights of the original authors.
+
+2. Benchmark Dataset Notice (MVTec AD):
+   The MVTec Anomaly Detection dataset (Bergmann et al., CVPR 2019) is distributed
+   by MVTec Software GmbH under the Creative Commons Attribution-NonCommercial-
+   ShareAlike 4.0 International License (CC BY-NC-SA 4.0). Dataset files are never
+   stored in or redistributed by this repository.

@@ -1,0 +1,56 @@
+# Researcher B (Luân) — Structural Bottleneck & Cross-Scale Adapter Compression (B1-B3)
+# Targets the 16.52M-parameter cross-scale alignment convolutions (c11..c32) and 9.45M GCM.res block.
+
+experiment:
+  name: "B2_cda_sep_adapter"
+  branch_owner: "luan_research_b"
+  seed: 42
+  output_dir: "./outputs/research_b"
+
+dataset:
+  name: "mvtec_ad"
+  data_root: "./datasets/mvtec"
+  img_size: 256
+  mean: [0.485, 0.456, 0.406]
+  std: [0.229, 0.224, 0.225]
+  core_categories:
+    - "carpet"
+    - "bottle"
+    - "screw"
+
+model:
+  # Supported variants:
+  # - "B1_aux_csd": Uses B0 checkpoint, prunes c11..c32 at inference (-38.25% active student params: 26.66M)
+  # - "B2_sep_adapter": Depthwise-Separable c11..c32 (1.86M vs 16.52M -> -33.95% total params: 28.52M)
+  # - "B3_cda_lite": B2 + Depthwise-Separable ConvBlocks in GCM (-54.94% total params: 19.46M)
+  variant: "B2_sep_adapter"
+  teacher_backbone: "wide_resnet50_2"
+  teacher_pretrained: true
+  adapter_mode: "separable"         # "dense" | "separable" | "infer_pruned"
+  gcm_conv_mode: "dense"            # "dense" (for B2) | "separable" (for B3)
+
+training:
+  epochs: 160
+  batch_size: 4
+  lr: 0.005
+  betas: [0.5, 0.999]
+  weight_decay: 0.0
+  shuffle: false
+  drop_last: true
+  num_workers: 2
+  save_interval: 10
+  eval_interval: 20
+
+loss:
+  lambda_same: 2.0
+  lambda_cross: 0.1
+  cross_scale_weights: [0.4, 0.2, 0.4]
+  cross_loss_mode: "official_train"
+
+inference:
+  fusion_mode: "A0_baseline"
+  same_weight: 2.0
+  cross_weight: 0.1
+  cross_scale_weights: [0.4, 0.2, 0.4]
+  gaussian_sigma: 4.0
+  image_score_mode: "max"
