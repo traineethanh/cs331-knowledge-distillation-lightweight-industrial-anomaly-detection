@@ -1,0 +1,36 @@
+# MVTec AD Dataset and Evaluation Configuration
+# Model, loss, and training hyperparameters are PENDING finalization.
+
+dataset:
+  name: "mvtec_ad"
+  data_root: "/kaggle/input/mvtec-ad"
+  img_size: 256
+  mean: [0.485, 0.456, 0.406]
+  std: [0.229, 0.224, 0.225]
+  val_split_ratio: 0.2
+  seed: 42
+  categories:
+    - "bottle"
+    - "cable"
+    - "capsule"
+    - "carpet"
+    - "grid"
+    - "hazelnut"
+    - "leather"
+    - "metal_nut"
+    - "pill"
+    - "screw"
+    - "tile"
+    - "toothbrush"
+    - "transistor"
+    - "wood"
+    - "zipper"
+
+evaluation:
+  metrics:
+    - "auroc_img"
+    - "ap_img"
+    - "auroc_pix"
+    - "ap_pix"
+    - "aupro_30"
+    - "aupro_05"

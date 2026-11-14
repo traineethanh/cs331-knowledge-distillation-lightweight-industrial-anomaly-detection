@@ -43,15 +43,22 @@ checkpoints/
 *.pkl
 *.h5
 
-# Experiment outputs, logs, TensorBoard, and heatmaps
-outputs/*
-!outputs/README.md
-!outputs/.gitkeep
+# Experiment results, outputs, logs, TensorBoard, and heatmaps
+results/*
+!results/README.md
+outputs/
 logs/
 log_txt/
 runs/
 events.out.tfevents*
 wandb/
+
+# Kaggle temporary files and working directories
+.kaggle/
+kaggle_working/
+kaggle_tmp/
+*.kgl
+__notebook_source__.ipynb
 
 # Copyrighted PDFs and private notes
 *.pdf

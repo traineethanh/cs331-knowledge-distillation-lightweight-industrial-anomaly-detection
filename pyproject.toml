@@ -5,14 +5,10 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "cs331-anomaly-detection"
 version = "0.1.0"
-description = "Reproducible research on lightweight knowledge-distillation-based industrial anomaly detection, CDA baseline reproduction, and controlled experimental improvements."
+description = "Knowledge Distillation-Based Lightweight Industrial Anomaly Detection on MVTec AD (CS331)."
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
-authors = [
-    {name = "Quang Thanh (Researcher A)"},
-    {name = "Luan (Researcher B)"}
-]
 dependencies = [
     "torch>=2.1.0",
     "torchvision>=0.16.0",
