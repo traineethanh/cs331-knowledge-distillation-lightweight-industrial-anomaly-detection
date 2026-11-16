@@ -1,109 +1,185 @@
-"""Reproducible Training Script for CDA Baseline (`B0`) and Research B Variants (`B2`, `B3`)."""
+#!/usr/bin/env python3
+"""CLI Training Script for Dual-Student Knowledge Distillation (DSKD).
+
+Usage:
+    python scripts/train.py --config configs/baseline_b0.yaml --category carpet --epochs 200
+"""
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "src"))
+# Add project root to PYTHONPATH
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import torch
 from torch.utils.data import DataLoader
 
-from anomaly_detection.data import MVTecTestDataset, MVTecTrainDataset
-from anomaly_detection.losses import CDALoss
-from anomaly_detection.models.baseline import TeacherEncoder
-from anomaly_detection.models.research_b import build_student_model
-from anomaly_detection.training import CDATrainer, load_checkpoint
-from anomaly_detection.utils import load_yaml_config, save_yaml_config, set_seed
+from src.anomaly_detection.data.mvtec import MVTecTrainDataset, build_image_transform
+from src.anomaly_detection.losses.dskd_loss import DSKDLoss
+from src.anomaly_detection.models.dskd import DSKDModel
+from src.anomaly_detection.training.trainer import DSKDTrainer
+from src.anomaly_detection.utils.config import load_yaml_config
+from src.anomaly_detection.utils.seed import set_seed
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Train DSKD Anomaly Detection Model")
+    parser.add_argument("--config", type=str, default="configs/baseline_b0.yaml", help="Path to YAML config")
+    parser.add_argument("--category", type=str, default=None, help="MVTec category (e.g., carpet, bottle)")
+    parser.add_argument("--data_root", "--data_dir", type=str, default=None, help="Path to MVTec AD dataset directory")
+    parser.add_argument("--epochs", type=int, default=None, help="Number of training epochs")
+    parser.add_argument("--batch_size", type=int, default=None, help="Batch size")
+    parser.add_argument("--lr", type=float, default=None, help="Learning rate")
+    parser.add_argument("--dfe_input_type", type=str, default=None, choices=["raw", "norm"], help="DFE input type")
+    parser.add_argument("--detach_dfe_input", type=lambda x: str(x).lower() in ("true", "1"), default=None, help="Stop gradient to Se")
+    parser.add_argument("--device", type=str, default=None, help="Compute device ('cuda' or 'cpu')")
+    parser.add_argument("--output_dir", type=str, default=None, help="Directory to save checkpoints and logs")
+    parser.add_argument("--seed", type=int, default=None, help="Random seed")
+    return parser.parse_args()
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Train CDA baseline or lightweight variants.")
-    parser.add_argument("--config", type=str, default="configs/baseline/cda_mvtec.yaml")
-    parser.add_argument("--data-root", type=str, default=None)
-    parser.add_argument("--categories", nargs="+", default=None)
-    parser.add_argument("--variant", type=str, default=None)
-    parser.add_argument("--epochs", type=int, default=None)
-    parser.add_argument("--resume", type=str, default=None)
-    args = parser.parse_args()
+    args = parse_args()
+    config = load_yaml_config(args.config)
 
-    cfg = load_yaml_config(args.config)
-    seed = int(cfg["experiment"].get("seed", 42))
+    # Apply CLI overrides
+    category = args.category or config.get("dataset", {}).get("category", "carpet")
+    data_root = args.data_root or config.get("dataset", {}).get("data_root", "/kaggle/input/mvtec-ad")
+    img_size = config.get("dataset", {}).get("img_size", 256)
+    val_split_ratio = config.get("dataset", {}).get("val_split_ratio", 0.2)
+    seed = args.seed if args.seed is not None else config.get("dataset", {}).get("seed", 42)
+
+    epochs = args.epochs or config.get("training", {}).get("epochs", 200)
+    batch_size = args.batch_size or config.get("training", {}).get("batch_size", 16)
+    num_workers = config.get("training", {}).get("num_workers", 2)
+    val_frequency = config.get("training", {}).get("val_frequency", 5)
+
+    learning_rate = args.lr or config.get("optimizer", {}).get("learning_rate", 0.001)
+    betas = tuple(config.get("optimizer", {}).get("betas", [0.5, 0.999]))
+    weight_decay = config.get("optimizer", {}).get("weight_decay", 0.0)
+    clip_grad_norm = config.get("optimizer", {}).get("clip_grad_norm", 1.0)
+
+    dfe_input_type = args.dfe_input_type or config.get("model", {}).get("dfe_input_type", "raw")
+    detach_dfe_input = args.detach_dfe_input if args.detach_dfe_input is not None else config.get("model", {}).get("detach_dfe_input", True)
+    has_f3_conv = config.get("model", {}).get("has_f3_conv", True)
+    upsample_mode = config.get("model", {}).get("upsample_mode", "bilinear")
+
+    loss_lambda = config.get("loss", {}).get("lambda", 0.1)
+    norm_variant = config.get("loss", {}).get("norm_variant", "N1")
+
+    base_checkpoint_dir = args.output_dir or config.get("training", {}).get("checkpoint_dir", "checkpoints/baseline_b0")
+    checkpoint_dir = Path(base_checkpoint_dir) / category
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+    # Set seed
     set_seed(seed)
 
-    data_root = args.data_root or cfg["dataset"]["data_root"]
-    categories = args.categories or cfg["dataset"].get("core_categories", ["carpet", "bottle", "screw"])
-    variant = args.variant or cfg["model"].get("variant", "B0")
-    epochs = args.epochs or int(cfg["training"]["epochs"])
-    img_size = int(cfg["dataset"].get("img_size", 256))
+    # Set device
+    if args.device:
+        device = torch.device(args.device)
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    encoder = TeacherEncoder(pretrained=bool(cfg["model"].get("teacher_pretrained", True)))
+    print(f"==================================================================")
+    print(f"DSKD Training Setup:")
+    print(f"  Category:        {category}")
+    print(f"  Data Root:       {data_root}")
+    print(f"  Device:          {device}")
+    print(f"  Epochs:          {epochs}")
+    print(f"  Batch Size:      {batch_size}")
+    print(f"  Learning Rate:   {learning_rate}")
+    print(f"  DFE Input Type:  {dfe_input_type}")
+    print(f"  Detach DFE:      {detach_dfe_input}")
+    print(f"  Checkpoint Dir:  {checkpoint_dir}")
+    print(f"==================================================================")
 
-    loss_cfg = cfg.get("loss", {})
-    loss_fn = CDALoss(
-        lambda_same=loss_cfg.get("lambda_same", 2.0),
-        lambda_cross=loss_cfg.get("lambda_cross", 0.1),
-        cross_scale_weights=loss_cfg.get("cross_scale_weights", [0.4, 0.2, 0.4]),
-        cross_loss_mode=loss_cfg.get("cross_loss_mode", "official_train"),
+    # Build datasets
+    train_transform = build_image_transform(resize_shape=img_size)
+
+    train_dataset = MVTecTrainDataset(
+        root_dir=data_root,
+        obj_name=category,
+        resize_shape=img_size,
+        transform=train_transform,
+        split="train",
+        val_ratio=val_split_ratio,
+        seed=seed,
     )
 
-    base_out = Path(cfg["experiment"].get("output_dir", "./outputs/baseline")) / variant
+    val_dataset = MVTecTrainDataset(
+        root_dir=data_root,
+        obj_name=category,
+        resize_shape=img_size,
+        transform=train_transform,
+        split="val",
+        val_ratio=val_split_ratio,
+        seed=seed,
+    )
 
-    for cat in categories:
-        set_seed(seed)
-        student = build_student_model(variant=variant)
-        train_cfg = cfg["training"]
-        optimizer = torch.optim.Adam(
-            student.parameters(),
-            lr=float(train_cfg.get("lr", 0.005)),
-            betas=tuple(train_cfg.get("betas", [0.5, 0.999])),
-            weight_decay=float(train_cfg.get("weight_decay", 0.0)),
-        )
+    print(f"Dataset loaded: {len(train_dataset)} train samples, {len(val_dataset)} validation samples.")
 
-        start_epoch = 0
-        if args.resume:
-            meta = load_checkpoint(args.resume, student=student, optimizer=optimizer, map_location=device)
-            start_epoch = int(meta.get("epoch", 0))
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers if device.type == "cuda" else 0,
+        pin_memory=(device.type == "cuda"),
+    )
 
-        train_ds = MVTecTrainDataset(root_dir=data_root, obj_name=cat, resize_shape=img_size)
-        test_ds = MVTecTestDataset(root_dir=data_root, obj_name=cat, resize_shape=img_size)
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers if device.type == "cuda" else 0,
+        pin_memory=(device.type == "cuda"),
+    ) if len(val_dataset) > 0 else None
 
-        train_loader = DataLoader(
-            train_ds,
-            batch_size=int(train_cfg.get("batch_size", 4)),
-            shuffle=bool(train_cfg.get("shuffle", False)),
-            drop_last=bool(train_cfg.get("drop_last", True)),
-            num_workers=int(train_cfg.get("num_workers", 0)),
-        )
-        test_loader = DataLoader(test_ds, batch_size=1, shuffle=False)
+    # Instantiate model
+    model = DSKDModel(
+        pretrained_teacher=True,
+        has_f3_conv=has_f3_conv,
+        dfe_input_type=dfe_input_type,
+        detach_dfe_input=detach_dfe_input,
+        upsample_mode=upsample_mode,
+    )
 
-        cat_out = base_out / cat
-        save_yaml_config(cfg, cat_out / "resolved_config.yaml")
+    # Instantiate loss
+    loss_fn = DSKDLoss(
+        loss_lambda=loss_lambda,
+        norm_variant=norm_variant,
+    )
 
-        trainer = CDATrainer(
-            encoder=encoder,
-            student=student,
-            loss_fn=loss_fn,
-            optimizer=optimizer,
-            device=device,
-            output_dir=cat_out,
-            img_size=img_size,
-            config=cfg,
-        )
-        summary = trainer.fit(
-            train_loader=train_loader,
-            test_loader=test_loader,
-            epochs=epochs,
-            start_epoch=start_epoch,
-            save_interval=int(train_cfg.get("save_interval", 10)),
-            eval_interval=int(train_cfg.get("eval_interval", 20)),
-        )
-        print(f"[{variant} | {cat}] Completed {epochs} epochs: {json.dumps(summary['last_epoch_metrics'])}")
+    # Instantiate trainer
+    trainer = DSKDTrainer(
+        model=model,
+        loss_fn=loss_fn,
+        learning_rate=learning_rate,
+        betas=betas,
+        weight_decay=weight_decay,
+        device=device,
+        checkpoint_dir=checkpoint_dir,
+        clip_grad_norm=clip_grad_norm,
+    )
+
+    # Run training
+    results = trainer.fit(
+        train_loader=train_loader,
+        val_loader=val_loader,
+        epochs=epochs,
+        val_frequency=val_frequency,
+    )
+
+    # Save results summary
+    history_file = checkpoint_dir / "training_history.json"
+    with open(history_file, "w", encoding="utf-8") as f:
+        json.dump(results, f, indent=2)
+
+    print(f"Training completed successfully! Saved history to: {history_file}")
 
 
 if __name__ == "__main__":

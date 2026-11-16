@@ -1,0 +1,44 @@
+# Baseline DSKD (B0-Clean) Configuration
+# Reference: Dual-Student Knowledge Distillation Networks for Unsupervised Anomaly Detection
+# arXiv:2402.00448v1
+
+dataset:
+  name: "mvtec_ad"
+  data_root: "/kaggle/input/mvtec-ad"
+  category: "carpet"
+  img_size: 256
+  val_split_ratio: 0.2
+  seed: 42
+
+model:
+  name: "dskd_b0_clean"
+  backbone: "resnet18"
+  pretrained_teacher: true
+  has_f3_conv: true
+  dfe_input_type: "raw"          # "raw" (Fig. 4 canonical) or "norm" (Algo. 2)
+  detach_dfe_input: true         # true (independent S_e) or false (joint S_e)
+  upsample_mode: "bilinear"
+
+loss:
+  lambda: 0.1                    # [PAPER FACT]: lambda = 0.1 in Eq. (6)
+  norm_variant: "N1"             # Unit-L2 normalization
+  eps: 1.0e-8
+
+optimizer:
+  name: "adam"                   # [PAPER FACT]: Adam optimizer
+  learning_rate: 0.001           # [PAPER FACT]: lr = 0.001 (Section 4.1.2)
+  betas: [0.5, 0.999]            # [PAPER FACT]: beta = (0.5, 0.999) (Section 4.1.2)
+  weight_decay: 0.0
+  clip_grad_norm: 1.0
+
+training:
+  epochs: 200                    # [PAPER FACT]: 200 epochs
+  batch_size: 16
+  num_workers: 2
+  val_frequency: 5
+  checkpoint_dir: "checkpoints/baseline_b0"
+
+evaluation:
+  gaussian_sigma: 4.0            # [PAPER FACT]: Gaussian filter sigma = 4.0 in Eq. (9)
+  max_fpr: 0.30
+  num_thresholds: 500

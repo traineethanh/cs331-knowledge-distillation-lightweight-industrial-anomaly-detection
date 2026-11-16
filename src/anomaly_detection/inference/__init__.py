@@ -1,5 +1,5 @@
-"""Inference-stage anomaly map generation and scoring."""
+"""Inference and anomaly map scoring modules."""
 
-from .anomaly_mapper import CDAAnomalyMapper, predict_batch
+from src.anomaly_detection.inference.anomaly_scorer import DSKDAnomalyScorer
 
-__all__ = ["CDAAnomalyMapper", "predict_batch"]
+__all__ = ["DSKDAnomalyScorer"]

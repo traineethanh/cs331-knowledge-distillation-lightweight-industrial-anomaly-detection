@@ -34,16 +34,12 @@ def _create_dummy_png(path: Path, size: tuple[int, int] = (64, 64), mode: str = 
 class TestConfigAndDataset(unittest.TestCase):
     def test_yaml_configs_load_cleanly(self) -> None:
         config_paths = [
-            ROOT / "configs" / "baseline" / "cda_mvtec.yaml",
-            ROOT / "configs" / "research_a" / "default.yaml",
-            ROOT / "configs" / "research_b" / "default.yaml",
-            ROOT / "configs" / "experiments" / "smoke_test.yaml",
+            ROOT / "configs" / "mvtec_ad.yaml",
         ]
         for path in config_paths:
             cfg = load_yaml_config(path)
-            self.assertIn("experiment", cfg)
             self.assertIn("dataset", cfg)
-            self.assertIn("model", cfg)
+            self.assertIn("evaluation", cfg)
 
     def test_mvtec_train_and_test_dataset_parsing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -86,6 +82,67 @@ class TestConfigAndDataset(unittest.TestCase):
 
             with self.assertRaises(ValueError):
                 _ = MVTecTrainDataset(root_dir=root, obj_name=cat, resize_shape=128)
+
+    def test_train_val_split_and_keyword_tolerance(self) -> None:
+        """Verify 80/20 train/val split is disjoint and keyword aliases are accepted."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cat = "carpet"
+            # Create 10 normal train images
+            for i in range(10):
+                _create_dummy_png(root / cat / "train" / "good" / f"{i:03d}.png")
+
+            # Create 2 test images
+            _create_dummy_png(root / cat / "test" / "good" / "000.png")
+            _create_dummy_png(root / cat / "test" / "hole" / "001.png")
+            _create_dummy_png(root / cat / "ground_truth" / "hole" / "001_mask.png", mode="L")
+
+            # Test alternative keywords (data_root, category, img_size)
+            train_ds = MVTecTrainDataset(data_root=root, category=cat, img_size=128, split="train", val_ratio=0.2, seed=42)
+            val_ds = MVTecTrainDataset(data_root=root, category=cat, img_size=128, split="val", val_ratio=0.2, seed=42)
+            test_ds = MVTecTestDataset(data_root=root, category=cat, img_size=128)
+
+            self.assertEqual(len(train_ds), 8)
+            self.assertEqual(len(val_ds), 2)
+            self.assertEqual(len(test_ds), 2)
+
+            # Check zero overlap between train and val
+            train_paths = {p.resolve() for p in train_ds.image_paths}
+            val_paths = {p.resolve() for p in val_ds.image_paths}
+            test_paths = {p.resolve() for p in test_ds.image_paths}
+
+            self.assertEqual(len(train_paths.intersection(val_paths)), 0)
+            self.assertEqual(len(train_paths.intersection(test_paths)), 0)
+            self.assertEqual(len(val_paths.intersection(test_paths)), 0)
+
+            # Check compatibility keys in test dataset
+            sample = test_ds[1]
+            self.assertIn("mask", sample)
+            self.assertIn("gt_mask", sample)
+            self.assertIn("img_path", sample)
+            self.assertIn("path", sample)
+
+    def test_val_ratio_zero_and_single_image_edge_cases(self) -> None:
+        """Verify val_ratio=0.0 produces an empty val split (zero leakage) and single-image train does not empty train."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cat = "carpet"
+            for i in range(5):
+                _create_dummy_png(root / cat / "train" / "good" / f"{i:03d}.png")
+
+            # Case 1: val_ratio=0.0 -> train gets all 5, val gets 0
+            train_ds_0 = MVTecTrainDataset(root_dir=root, obj_name=cat, split="train", val_ratio=0.0, seed=42)
+            val_ds_0 = MVTecTrainDataset(root_dir=root, obj_name=cat, split="val", val_ratio=0.0, seed=42)
+            self.assertEqual(len(train_ds_0), 5)
+            self.assertEqual(len(val_ds_0), 0)
+
+            # Case 2: Only 1 image in train/good with val_ratio=0.2 -> train keeps 1, val gets 0
+            cat_single = "bottle"
+            _create_dummy_png(root / cat_single / "train" / "good" / "000.png")
+            train_single = MVTecTrainDataset(root_dir=root, obj_name=cat_single, split="train", val_ratio=0.2, seed=42)
+            val_single = MVTecTrainDataset(root_dir=root, obj_name=cat_single, split="val", val_ratio=0.2, seed=42)
+            self.assertEqual(len(train_single), 1)
+            self.assertEqual(len(val_single), 0)
 
 
 if __name__ == "__main__":

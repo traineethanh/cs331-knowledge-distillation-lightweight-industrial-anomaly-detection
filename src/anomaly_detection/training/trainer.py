@@ -1,233 +1,233 @@
-"""Reproducible CDA trainer supporting full-state checkpointing and Kaggle session resume."""
+"""Training pipeline for Dual-Student Knowledge Distillation (DSKD).
+
+Reference Paper:
+Dual-Student Knowledge Distillation Networks for Unsupervised Anomaly Detection
+arXiv:2402.00448v1 - Algorithm 1 (DSKD Training Procedure).
+"""
 
 from __future__ import annotations
 
-import json
+import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
-import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
-from ..evaluation.metrics import evaluate_predictions
-from ..inference.anomaly_mapper import CDAAnomalyMapper, predict_batch
-from ..losses.cda_loss import CDALoss
+from src.anomaly_detection.losses.dskd_loss import DSKDLoss
+from src.anomaly_detection.models.dskd import DSKDModel
+from src.anomaly_detection.training.checkpoint import CheckpointManager
 
 
-def save_checkpoint(
-    path: str | Path,
-    student: nn.Module,
-    optimizer: Optional[torch.optim.Optimizer] = None,
-    epoch: int = 0,
-    best_metrics: Optional[Dict[str, Any]] = None,
-    config: Optional[Dict[str, Any]] = None,
-) -> Path:
-    """Saves both full training state and raw state_dict compatibility."""
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    payload: Dict[str, Any] = {
-        "epoch": int(epoch),
-        "model_state_dict": student.state_dict(),
-        "best_metrics": best_metrics or {},
-        "config": config or {},
-    }
-    if optimizer is not None:
-        payload["optimizer_state_dict"] = optimizer.state_dict()
-    torch.save(payload, target)
-    return target
-
-
-def load_checkpoint(
-    path: str | Path,
-    student: nn.Module,
-    optimizer: Optional[torch.optim.Optimizer] = None,
-    map_location: str | torch.device = "cpu",
-) -> Dict[str, Any]:
-    """Loads either our full checkpoint dict or an official CDA raw `state_dict`."""
-    ckpt_path = Path(path)
-    if not ckpt_path.exists():
-        raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
-
-    raw = torch.load(ckpt_path, map_location=map_location, weights_only=False)
-    if isinstance(raw, dict) and "model_state_dict" in raw:
-        student.load_state_dict(raw["model_state_dict"])
-        if optimizer is not None and "optimizer_state_dict" in raw:
-            optimizer.load_state_dict(raw["optimizer_state_dict"])
-        return {
-            "epoch": int(raw.get("epoch", 0)),
-            "best_metrics": raw.get("best_metrics", {}),
-            "config": raw.get("config", {}),
-        }
-
-    # Official WHUer-cloud/CDA checkpoints store raw student.state_dict() directly
-    student.load_state_dict(raw)
-    return {"epoch": 0, "best_metrics": {}, "config": {}}
-
-
-class CDATrainer:
-    """Manages training, periodic evaluation, and leak-free checkpoint archiving."""
+class DSKDTrainer:
+    """Manages the dual-optimizer training procedure of DSKD."""
 
     def __init__(
         self,
-        encoder: nn.Module,
-        student: nn.Module,
-        loss_fn: CDALoss,
-        optimizer: torch.optim.Optimizer,
-        device: torch.device,
-        output_dir: str | Path,
-        img_size: int = 256,
-        config: Optional[Dict[str, Any]] = None,
+        model: DSKDModel,
+        loss_fn: DSKDLoss,
+        learning_rate: float = 0.001,       # [PAPER FACT]: lr = 0.001
+        betas: Tuple[float, float] = (0.5, 0.999),  # [PAPER FACT]: beta = (0.5, 0.999)
+        weight_decay: float = 0.0,
+        device: Optional[torch.device] = None,
+        checkpoint_dir: str | Path = "checkpoints",
+        clip_grad_norm: float = 1.0,
     ) -> None:
-        self.encoder = encoder.to(device).eval()
-        self.student = student.to(device)
-        self.loss_fn = loss_fn
-        self.optimizer = optimizer
-        self.device = device
-        self.output_dir = Path(output_dir)
-        self.ckpt_dir = self.output_dir / "checkpoints"
-        self.ckpt_dir.mkdir(parents=True, exist_ok=True)
-        self.img_size = int(img_size)
-        self.config = config or {}
+        self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model = model.to(self.device)
+        self.loss_fn = loss_fn.to(self.device)
+        self.clip_grad_norm = clip_grad_norm
 
-    def train_one_epoch(self, train_loader: DataLoader) -> Dict[str, float]:
-        self.encoder.eval()
-        self.student.train()
+        # Separate optimizers according to Algorithm 1, lines 16-17
+        self.optimizer_e = torch.optim.Adam(
+            self.model.get_encoder_params(),
+            lr=learning_rate,
+            betas=betas,
+            weight_decay=weight_decay,
+        )
 
-        total_loss = 0.0
-        total_same = 0.0
-        total_cross = 0.0
-        num_batches = 0
+        self.optimizer_d = torch.optim.Adam(
+            self.model.get_decoder_system_params(),
+            lr=learning_rate,
+            betas=betas,
+            weight_decay=weight_decay,
+        )
 
-        for batch in train_loader:
-            img = batch["image"].to(self.device)
-            with torch.no_grad():
-                e1, e2, e3 = self.encoder(img)
+        self.checkpoint_manager = CheckpointManager(checkpoint_dir)
+        self.history: Dict[str, list] = {
+            "epoch": [],
+            "train_loss_e": [],
+            "train_loss_d": [],
+            "train_loss_total": [],
+            "val_loss_total": [],
+        }
 
-            outputs = self.student(e1, e2, e3)
-            loss, parts = self.loss_fn([e1, e2, e3], outputs)
+    def train_epoch(self, train_loader: DataLoader) -> Dict[str, float]:
+        """Runs one full training epoch across the dataset."""
+        self.model.train()
+        self.model.teacher.eval()  # Teacher must always remain frozen in eval mode
 
-            self.optimizer.zero_grad()
-            loss.backward()
-            self.optimizer.step()
+        total_loss_e = 0.0
+        total_loss_d = 0.0
+        num_batches = len(train_loader)
 
-            total_loss += parts["loss_total"]
-            total_same += parts["loss_same"]
-            total_cross += parts["loss_cross"]
-            num_batches += 1
+        for batch_idx, batch in enumerate(train_loader):
+            # Support both tensor and dict batch returns
+            if isinstance(batch, (list, tuple)):
+                images = batch[0]
+            elif isinstance(batch, dict):
+                images = batch["image"]
+            else:
+                images = batch
 
-        denom = max(1, num_batches)
+            images = images.to(self.device)
+
+            self.optimizer_e.zero_grad()
+            self.optimizer_d.zero_grad()
+
+            # Forward pass
+            f_t, f_e, f_d = self.model(images)
+
+            # Compute losses
+            loss_e, loss_d, _, _ = self.loss_fn(f_t, f_e, f_d)
+
+            # Backward pass
+            if self.model.detach_dfe_input:
+                # Independent gradient graphs
+                loss_e.backward()
+                loss_d.backward()
+            else:
+                # Joint graph: retain graph on first backward
+                loss_e.backward(retain_graph=True)
+                loss_d.backward()
+
+            # Optional gradient clipping
+            if self.clip_grad_norm > 0:
+                torch.nn.utils.clip_grad_norm_(self.model.get_encoder_params(), self.clip_grad_norm)
+                torch.nn.utils.clip_grad_norm_(self.model.get_decoder_system_params(), self.clip_grad_norm)
+
+            self.optimizer_e.step()
+            self.optimizer_d.step()
+
+            total_loss_e += loss_e.item()
+            total_loss_d += loss_d.item()
+
+        avg_loss_e = total_loss_e / max(1, num_batches)
+        avg_loss_d = total_loss_d / max(1, num_batches)
+
         return {
-            "loss_total": total_loss / denom,
-            "loss_same": total_same / denom,
-            "loss_cross": total_cross / denom,
+            "loss_e": avg_loss_e,
+            "loss_d": avg_loss_d,
+            "loss_total": avg_loss_e + avg_loss_d,
         }
 
     @torch.no_grad()
-    def evaluate(
-        self,
-        test_loader: DataLoader,
-        mapper: Optional[CDAAnomalyMapper] = None,
-        include_aupro: bool = True,
-    ) -> Tuple[Dict[str, float], np.ndarray, np.ndarray, np.ndarray]:
-        active_mapper = mapper or CDAAnomalyMapper(img_size=self.img_size)
-        all_maps: List[np.ndarray] = []
-        all_scores: List[np.ndarray] = []
-        all_labels: List[int] = []
-        all_gts: List[np.ndarray] = []
+    def validate(self, val_loader: DataLoader) -> Dict[str, float]:
+        """Evaluates loss convergence on validation images."""
+        self.model.eval()
 
-        for batch in test_loader:
-            imgs = batch["image"].to(self.device)
-            maps, scores = predict_batch(self.encoder, self.student, imgs, active_mapper)
-            all_maps.append(maps)
-            all_scores.append(scores)
-            labels_np = batch["label"].reshape(-1).cpu().numpy()
-            for lbl in labels_np:
-                all_labels.append(int(lbl))
-            gts_np = batch["gt_mask"].squeeze(1).cpu().numpy()
-            all_gts.append(gts_np)
+        total_loss_e = 0.0
+        total_loss_d = 0.0
+        num_batches = len(val_loader)
 
-        maps_cat = np.concatenate(all_maps, axis=0)
-        scores_cat = np.concatenate(all_scores, axis=0)
-        labels_arr = np.asarray(all_labels, dtype=np.int32)
-        gts_cat = np.concatenate(all_gts, axis=0)
+        for batch in val_loader:
+            if isinstance(batch, (list, tuple)):
+                images = batch[0]
+            elif isinstance(batch, dict):
+                images = batch["image"]
+            else:
+                images = batch
 
-        metrics_dict = evaluate_predictions(
-            anomaly_maps=maps_cat,
-            image_labels=labels_arr,
-            gt_masks=gts_cat,
-            image_scores=scores_cat,
-            include_aupro=include_aupro,
-        )
-        return metrics_dict, maps_cat, labels_arr, gts_cat
+            images = images.to(self.device)
+
+            f_t, f_e, f_d = self.model(images)
+            loss_e, loss_d, _, _ = self.loss_fn(f_t, f_e, f_d)
+
+            total_loss_e += loss_e.item()
+            total_loss_d += loss_d.item()
+
+        avg_loss_e = total_loss_e / max(1, num_batches)
+        avg_loss_d = total_loss_d / max(1, num_batches)
+
+        return {
+            "val_loss_e": avg_loss_e,
+            "val_loss_d": avg_loss_d,
+            "val_loss_total": avg_loss_e + avg_loss_d,
+        }
 
     def fit(
         self,
         train_loader: DataLoader,
-        test_loader: Optional[DataLoader] = None,
-        epochs: int = 160,
-        start_epoch: int = 0,
-        save_interval: int = 10,
-        eval_interval: int = 20,
+        val_loader: Optional[DataLoader] = None,
+        epochs: int = 200,
+        val_frequency: int = 5,
+        save_best: bool = True,
+        on_epoch_end: Optional[Callable[[int, Dict[str, float]], None]] = None,
     ) -> Dict[str, Any]:
-        history: List[Dict[str, Any]] = []
-        best_metrics: Dict[str, Any] = {
-            "best_test_auroc_img": 0.0,
-            "best_test_auroc_pix": 0.0,
+        """Executes the complete multi-epoch training schedule."""
+        best_val_loss = float("inf")
+        start_time = time.time()
+
+        print(f"Starting DSKD Training on {self.device} for {epochs} epochs...")
+
+        for epoch in range(1, epochs + 1):
+            epoch_start = time.time()
+            train_metrics = self.train_epoch(train_loader)
+            epoch_duration = time.time() - epoch_start
+
+            val_metrics = {}
+            if val_loader is not None and (epoch % val_frequency == 0 or epoch == epochs):
+                val_metrics = self.validate(val_loader)
+
+            val_total = val_metrics.get("val_loss_total", train_metrics["loss_total"])
+
+            # Track history
+            self.history["epoch"].append(epoch)
+            self.history["train_loss_e"].append(train_metrics["loss_e"])
+            self.history["train_loss_d"].append(train_metrics["loss_d"])
+            self.history["train_loss_total"].append(train_metrics["loss_total"])
+            self.history["val_loss_total"].append(val_total)
+
+            is_best = val_total < best_val_loss
+            if is_best:
+                best_val_loss = val_total
+
+            # Save latest checkpoint
+            checkpoint_state = {
+                "epoch": epoch,
+                "model_state_dict": self.model.state_dict(),
+                "optimizer_e_state_dict": self.optimizer_e.state_dict(),
+                "optimizer_d_state_dict": self.optimizer_d.state_dict(),
+                "best_val_loss": best_val_loss,
+                "history": self.history,
+            }
+
+            self.checkpoint_manager.save(
+                checkpoint_state,
+                is_best=(is_best and save_best),
+            )
+
+            # Console output
+            val_str = f" | Val: {val_total:.5f}" if val_metrics else ""
+            best_mark = " [*Best*]" if is_best and val_metrics else ""
+            print(
+                f"Epoch [{epoch:3d}/{epochs:3d}] ({epoch_duration:.2f}s) "
+                f"Loss_E: {train_metrics['loss_e']:.5f} | "
+                f"Loss_D: {train_metrics['loss_d']:.5f} | "
+                f"Total: {train_metrics['loss_total']:.5f}"
+                f"{val_str}{best_mark}"
+            )
+
+            if on_epoch_end is not None:
+                combined_metrics = {**train_metrics, **val_metrics}
+                on_epoch_end(epoch, combined_metrics)
+
+        total_time = time.time() - start_time
+        print(f"Training completed in {total_time / 60:.2f} minutes. Best Val Loss: {best_val_loss:.5f}")
+
+        return {
+            "total_time_seconds": total_time,
+            "best_val_loss": best_val_loss,
+            "history": self.history,
         }
-
-        for epoch in range(start_epoch, epochs):
-            train_stats = self.train_one_epoch(train_loader)
-            record: Dict[str, Any] = {"epoch": epoch + 1, **train_stats}
-
-            is_last = (epoch + 1) == epochs
-            if (save_interval > 0 and (epoch + 1) % save_interval == 0) or is_last:
-                save_checkpoint(
-                    self.ckpt_dir / "last.pth",
-                    student=self.student,
-                    optimizer=self.optimizer,
-                    epoch=epoch + 1,
-                    best_metrics=best_metrics,
-                    config=self.config,
-                )
-
-            if test_loader is not None and (
-                (eval_interval > 0 and (epoch + 1) % eval_interval == 0) or is_last
-            ):
-                eval_res, _, _, _ = self.evaluate(test_loader, include_aupro=is_last)
-                record.update(eval_res)
-                if eval_res["auroc_img"] > best_metrics["best_test_auroc_img"]:
-                    best_metrics["best_test_auroc_img"] = eval_res["auroc_img"]
-                    best_metrics["best_img_epoch"] = epoch + 1
-                    save_checkpoint(
-                        self.ckpt_dir / "best_test_img.pth",
-                        student=self.student,
-                        optimizer=self.optimizer,
-                        epoch=epoch + 1,
-                        best_metrics=best_metrics,
-                        config=self.config,
-                    )
-                if eval_res["auroc_pix"] > best_metrics["best_test_auroc_pix"]:
-                    best_metrics["best_test_auroc_pix"] = eval_res["auroc_pix"]
-                    best_metrics["best_pix_epoch"] = epoch + 1
-                    save_checkpoint(
-                        self.ckpt_dir / "best_test_pix.pth",
-                        student=self.student,
-                        optimizer=self.optimizer,
-                        epoch=epoch + 1,
-                        best_metrics=best_metrics,
-                        config=self.config,
-                    )
-
-            history.append(record)
-
-        summary = {
-            "epochs_completed": epochs,
-            "last_epoch_metrics": history[-1] if history else {},
-            "best_test_reference": best_metrics,
-            "history": history,
-        }
-        with open(self.output_dir / "metrics_summary.json", "w", encoding="utf-8") as f:
-            json.dump(summary, f, indent=2)
-        return summary

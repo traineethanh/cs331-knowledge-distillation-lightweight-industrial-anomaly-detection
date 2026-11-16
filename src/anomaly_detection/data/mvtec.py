@@ -8,6 +8,7 @@ Fixes three critical bugs identified in the official CDA repository (`dataloder.
 
 from __future__ import annotations
 
+import random
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -44,7 +45,7 @@ def build_image_transform(
     mean: Sequence[float] = IMAGENET_MEAN,
     std: Sequence[float] = IMAGENET_STD,
 ) -> transforms.Compose:
-    """Builds the standard CDA image preprocessing pipeline."""
+    """Builds the standard STFPM/CDA image preprocessing pipeline."""
     return transforms.Compose(
         [
             transforms.Resize((resize_shape, resize_shape)),
@@ -65,24 +66,46 @@ def build_mask_transform(resize_shape: int = 256) -> transforms.Compose:
 
 
 class MVTecTrainDataset(Dataset):
-    """Unsupervised training dataset loading only defect-free (`train/good`) images."""
+    """Unsupervised training dataset loading only defect-free (`train/good`) images.
+
+    Supports paper-defined 80/20 train/validation split on normal images for model selection.
+    """
 
     def __init__(
         self,
-        root_dir: str | Path,
-        obj_name: str,
+        root_dir: Optional[str | Path] = None,
+        obj_name: Optional[str] = None,
         resize_shape: int = 256,
         transform: Optional[Callable] = None,
+        split: str = "train",
+        val_ratio: float = 0.2,
+        seed: int = 42,
+        *,
+        data_root: Optional[str | Path] = None,
+        category: Optional[str] = None,
+        img_size: Optional[int] = None,
     ) -> None:
-        self.root_dir = Path(root_dir)
-        self.obj_name = obj_name
-        self.resize_shape = int(resize_shape)
+        raw_root = root_dir if root_dir is not None else data_root
+        raw_obj = obj_name if obj_name is not None else category
+        raw_shape = resize_shape if img_size is None else img_size
+
+        if raw_root is None:
+            raise ValueError("root_dir (or data_root) must be provided.")
+        if raw_obj is None:
+            raise ValueError("obj_name (or category) must be provided.")
+
+        self.root_dir = Path(raw_root)
+        self.obj_name = str(raw_obj)
+        self.resize_shape = int(raw_shape)
+        self.split = str(split).lower()
+        self.val_ratio = float(val_ratio)
+        self.seed = int(seed)
 
         train_dir = self.root_dir / self.obj_name / "train"
         if not train_dir.exists():
             raise FileNotFoundError(
                 f"Training directory not found: {train_dir}. "
-                f"Check --data-root (currently '{self.root_dir}')."
+                f"Check root_dir (currently '{self.root_dir}')."
             )
 
         # In unsupervised one-class protocol, only 'good' images are allowed in train
@@ -93,9 +116,37 @@ class MVTecTrainDataset(Dataset):
                 f"Unsupervised protocol violation: found {len(non_good)} non-'good' "
                 f"training images in {train_dir} (e.g., {non_good[0]})."
             )
-        self.image_paths: List[Path] = all_pngs
-        if not self.image_paths:
+
+        if not all_pngs:
             raise FileNotFoundError(f"No training .png images found in {train_dir}")
+
+        # Deterministic 80/20 train/validation split on normal training images
+        if self.split == "all":
+            self.image_paths: List[Path] = all_pngs
+        elif self.split not in ("train", "val"):
+            raise ValueError(f"Invalid split '{self.split}'. Expected 'train', 'val', or 'all'.")
+        elif self.val_ratio <= 0.0:
+            if self.split == "train":
+                self.image_paths = all_pngs
+            else:  # "val" must be empty when val_ratio == 0.0 to prevent train->val leakage
+                self.image_paths = []
+        elif len(all_pngs) < 2:
+            # Too few images to split: keep image in train and leave val empty
+            if self.split == "train":
+                self.image_paths = all_pngs
+            else:
+                self.image_paths = []
+        else:
+            rng = random.Random(self.seed)
+            indices = list(range(len(all_pngs)))
+            rng.shuffle(indices)
+            val_count = min(len(all_pngs) - 1, max(1, int(round(len(all_pngs) * self.val_ratio))))
+            val_indices = set(indices[:val_count])
+
+            if self.split == "train":
+                self.image_paths = [p for i, p in enumerate(all_pngs) if i not in val_indices]
+            else:  # "val"
+                self.image_paths = [p for i, p in enumerate(all_pngs) if i in val_indices]
 
         self.transform = transform or build_image_transform(self.resize_shape)
 
@@ -110,6 +161,7 @@ class MVTecTrainDataset(Dataset):
         return {
             "image": tensor_img,
             "path": str(img_path),
+            "img_path": str(img_path),
         }
 
 
@@ -118,15 +170,28 @@ class MVTecTestDataset(Dataset):
 
     def __init__(
         self,
-        root_dir: str | Path,
-        obj_name: str,
+        root_dir: Optional[str | Path] = None,
+        obj_name: Optional[str] = None,
         resize_shape: int = 256,
         transform: Optional[Callable] = None,
         gt_transform: Optional[Callable] = None,
+        *,
+        data_root: Optional[str | Path] = None,
+        category: Optional[str] = None,
+        img_size: Optional[int] = None,
     ) -> None:
-        self.root_dir = Path(root_dir)
-        self.obj_name = obj_name
-        self.resize_shape = int(resize_shape)
+        raw_root = root_dir if root_dir is not None else data_root
+        raw_obj = obj_name if obj_name is not None else category
+        raw_shape = resize_shape if img_size is None else img_size
+
+        if raw_root is None:
+            raise ValueError("root_dir (or data_root) must be provided.")
+        if raw_obj is None:
+            raise ValueError("obj_name (or category) must be provided.")
+
+        self.root_dir = Path(raw_root)
+        self.obj_name = str(raw_obj)
+        self.resize_shape = int(raw_shape)
 
         self.test_dir = self.root_dir / self.obj_name / "test"
         self.gt_root = self.root_dir / self.obj_name / "ground_truth"
@@ -174,15 +239,17 @@ class MVTecTestDataset(Dataset):
             with Image.open(gt_path) as raw_mask:
                 mask_l = raw_mask.convert("L")
             gt_mask = self.gt_transform(mask_l)
-            # Binarize mask at 0.5 matching official test.py lines 23-24
+            # Binarize mask at 0.5 matching official protocol
             gt_mask = (gt_mask > 0.5).float()
 
         return {
             "image": tensor_img,
             "label": gt_label,
             "gt_mask": gt_mask,
+            "mask": gt_mask,
             "defect_type": defect_type,
             "path": str(img_path),
+            "img_path": str(img_path),
         }
 
 
@@ -190,18 +257,40 @@ def validate_mvtec_category(
     root_dir: str | Path,
     obj_name: str,
     resize_shape: int = 256,
+    val_ratio: float = 0.2,
+    seed: int = 42,
 ) -> Dict[str, Any]:
-    """Validates directory structure, tensor shapes, and train/test split disjointness."""
-    train_ds = MVTecTrainDataset(root_dir=root_dir, obj_name=obj_name, resize_shape=resize_shape)
+    """Validates directory structure, tensor shapes, and train/val/test disjointness."""
+    all_train_ds = MVTecTrainDataset(
+        root_dir=root_dir, obj_name=obj_name, resize_shape=resize_shape, split="all"
+    )
     test_ds = MVTecTestDataset(root_dir=root_dir, obj_name=obj_name, resize_shape=resize_shape)
 
-    train_set = {Path(p).resolve() for p in train_ds.image_paths}
+    train_set = {Path(p).resolve() for p in all_train_ds.image_paths}
     test_set = {Path(p).resolve() for p in test_ds.image_paths}
-    overlap = train_set.intersection(test_set)
-    if overlap:
-        raise RuntimeError(f"Data leakage detected! {len(overlap)} files appear in both train and test.")
 
-    sample_train = train_ds[0]
+    train_test_overlap = train_set.intersection(test_set)
+    if train_test_overlap:
+        raise RuntimeError(f"Data leakage detected! {len(train_test_overlap)} files appear in both train and test.")
+
+    zero_train_val_overlap = True
+    num_val_good = 0
+    if val_ratio > 0.0 and len(all_train_ds) >= 2:
+        split_train = MVTecTrainDataset(
+            root_dir=root_dir, obj_name=obj_name, resize_shape=resize_shape, split="train", val_ratio=val_ratio, seed=seed
+        )
+        split_val = MVTecTrainDataset(
+            root_dir=root_dir, obj_name=obj_name, resize_shape=resize_shape, split="val", val_ratio=val_ratio, seed=seed
+        )
+        s_train = {Path(p).resolve() for p in split_train.image_paths}
+        s_val = {Path(p).resolve() for p in split_val.image_paths}
+        train_val_overlap = s_train.intersection(s_val)
+        if train_val_overlap:
+            raise RuntimeError(f"Data leakage detected! {len(train_val_overlap)} files appear in both train and val.")
+        num_val_good = len(split_val)
+        zero_train_val_overlap = len(train_val_overlap) == 0
+
+    sample_train = all_train_ds[0]
     sample_test = test_ds[0]
 
     n_good_test = sum(1 for p in test_ds.image_paths if p.parent.name == "good")
@@ -210,7 +299,8 @@ def validate_mvtec_category(
 
     return {
         "category": obj_name,
-        "num_train_good": len(train_ds),
+        "num_train_good": len(all_train_ds),
+        "num_val_good": num_val_good,
         "num_test_total": len(test_ds),
         "num_test_good": n_good_test,
         "num_test_anomalous": n_anom_test,
@@ -218,5 +308,6 @@ def validate_mvtec_category(
         "train_image_shape": tuple(sample_train["image"].shape),
         "test_image_shape": tuple(sample_test["image"].shape),
         "test_mask_shape": tuple(sample_test["gt_mask"].shape),
-        "zero_train_test_overlap": len(overlap) == 0,
+        "zero_train_test_overlap": len(train_test_overlap) == 0,
+        "zero_train_val_overlap": zero_train_val_overlap,
     }

@@ -1,5 +1,9 @@
-"""Training loop and checkpoint management utilities."""
+"""Training and checkpointing modules for DSKD."""
 
-from .trainer import CDATrainer, load_checkpoint, save_checkpoint
+from src.anomaly_detection.training.checkpoint import CheckpointManager
+from src.anomaly_detection.training.trainer import DSKDTrainer
 
-__all__ = ["save_checkpoint", "load_checkpoint", "CDATrainer"]
+__all__ = [
+    "CheckpointManager",
+    "DSKDTrainer",
+]
