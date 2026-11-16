@@ -129,7 +129,12 @@ def main() -> None:
 
     print("Running inference across test batches...")
     for batch in tqdm(test_loader, desc="Inference"):
-        images, masks, is_anomaly, defect_types, paths = batch
+        if isinstance(batch, dict):
+            images = batch["image"]
+            masks = batch["gt_mask"]
+            is_anomaly = batch["label"]
+        else:
+            images, masks, is_anomaly, _, _ = batch
         images = images.to(device)
 
         batch_maps, batch_scores = scorer.predict_batch(model, images)
@@ -150,11 +155,12 @@ def main() -> None:
     # 4. Compute Metrics
     print("Computing AUROC, Average Precision, and AUPRO metrics...")
 
-    # Image-level
-    img_metrics = compute_auroc_and_ap(gt_labels, pred_scores)
-
-    # Pixel-level
-    pix_metrics = compute_auroc_and_ap(gt_masks.flatten(), pred_maps.flatten())
+    metrics_dict = compute_auroc_and_ap(
+        anomaly_maps=pred_maps,
+        image_labels=gt_labels,
+        gt_masks=gt_masks,
+        image_scores=pred_scores,
+    )
 
     # AUPRO @ 0.30 and 0.05
     aupro_30 = compute_aupro(pred_maps, gt_masks, max_fpr=0.30, num_thresholds=500)
@@ -162,10 +168,10 @@ def main() -> None:
 
     results = {
         "category": category,
-        "image_auroc": float(img_metrics["auroc"]),
-        "image_ap": float(img_metrics["average_precision"]),
-        "pixel_auroc": float(pix_metrics["auroc"]),
-        "pixel_ap": float(pix_metrics["average_precision"]),
+        "image_auroc": float(metrics_dict["auroc_img"]),
+        "image_ap": float(metrics_dict["ap_img"]),
+        "pixel_auroc": float(metrics_dict["auroc_pix"]),
+        "pixel_ap": float(metrics_dict["ap_pix"]),
         "pixel_aupro_30": float(aupro_30),
         "pixel_aupro_05": float(aupro_05),
         "num_test_samples": int(len(gt_labels)),
